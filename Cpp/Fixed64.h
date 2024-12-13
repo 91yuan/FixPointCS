@@ -33,6 +33,7 @@
 
 // Include numeric types
 #include <stdint.h>
+#include <memory.h>
 #include "FixedUtil.h"
 
 
@@ -53,6 +54,7 @@
 
 namespace Fixed64
 {
+#define USE_IEEE754_2_FLOAT 1
     typedef int32_t FP_INT;
     typedef uint32_t FP_UINT;
     typedef int64_t FP_LONG;
@@ -103,7 +105,57 @@ namespace Fixed64
     /// </summary>
     static FP_LONG FromDouble(double v)
     {
+    #if USE_IEEE754_2_FLOAT
+        FP_INT fractionalBits = Shift;
+        if (v > 2147483647.0) {
+            return INT64_MAX;
+        }
+        if (v < -2147483648.0) {
+            return INT64_MIN;
+        }
+        // IEEE 754 format storage space
+        FP_ULONG ieee754;
+
+        // Copy the memory of double to uint64_t
+        memcpy(&ieee754, &v, sizeof(v));
+
+        // Extract the sign bit
+        FP_LONG sign = (ieee754 >> 63) & 0x1; // the sign bit
+        // Extract the exponent and adjust
+        FP_LONG exponent = (ieee754 >> 52) & 0x7FF; // 11-bit exponent
+        // Extract the mantissa (Mantissa)
+        FP_LONG mantissa = ieee754 & 0xFFFFFFFFFFFFF; // 52-bit mantissa
+
+        // Exponent adjustment
+        if (exponent == 0) {
+            // Denormalized number, handle as 0
+            return 0;
+        }
+        else if (exponent == 0x7FF) {
+            // If the exponent bits are all 1, return infinity or NaN
+            return (sign) ? INT64_MIN : INT64_MAX; // Return the maximum or minimum value based on the sign
+        }
+
+        // Calculate the effective exponent, subtract the offset (1023) and add 32 (because it needs to be multiplied by 2^32)
+        exponent -= 1023;
+        FP_LONG fixedPointValue = ((1LL << 52) + mantissa);
+        FP_INT rightShift = (52 - (fractionalBits + exponent));
+        if (rightShift >= 0) {
+            fixedPointValue = fixedPointValue >> rightShift;
+        }
+        else {
+            fixedPointValue = fixedPointValue << (-rightShift);
+        }
+
+        // If it's negative, adjust the sign
+        if (sign) {
+            fixedPointValue = -fixedPointValue;
+        }
+
+        return fixedPointValue;
+    #else
         return (FP_LONG)(v * 4294967296.0);
+    #endif
     }
 
     /// <summary>
@@ -111,7 +163,59 @@ namespace Fixed64
     /// </summary>
     static FP_LONG FromFloat(float v)
     {
+    #if USE_IEEE754_2_FLOAT
+        FP_INT fractionalBits = Shift;
+        if (v > 2147483647.0f) {
+            return INT64_MAX;
+        }
+        if (v < -2147483648.0f) {
+            return INT64_MIN;
+        }
+
+        // IEEE 754 format storage space
+        FP_UINT ieee754;
+
+        // Copy the memory of float to uint32_t
+        memcpy(&ieee754, &v, sizeof(v));
+
+        // Extract the sign bit
+        FP_INT sign = (ieee754 >> 31) & 0x1; // Sign bit
+        // Extract the exponent and adjust
+        FP_INT exponent = (ieee754 >> 23) & 0xFF; // 8-bit exponent
+        // Extract the mantissa (Mantissa)
+        FP_INT mantissa = ieee754 & 0x7FFFFF; // 23-bit mantissa
+
+        // Exponent adjustment
+        if (exponent == 0) {
+            // Denormalized number, handle as 0
+            return 0;
+        }
+        else if (exponent == 0xFF) {
+            // If the exponent bits are all 1, return infinity or NaN
+            return (sign) ? INT64_MIN : INT64_MAX; // Return the maximum or minimum value based on the sign
+        }
+
+        // Calculate the effective exponent, subtract the offset (127) and add 32 (because it needs to be multiplied by 2^32)
+        exponent -= 127;
+        FP_LONG fixedPointValue = ((1LL << 23) + mantissa);
+
+        FP_INT leftShift = (exponent + fractionalBits - 23LL);
+        if (leftShift >= 0) {
+            fixedPointValue = fixedPointValue << leftShift;
+        }
+        else {
+            fixedPointValue = fixedPointValue >> (-leftShift);
+        }
+
+        // If it's negative, adjust the sign
+        if (sign) {
+            fixedPointValue = -fixedPointValue;
+        }
+
+        return fixedPointValue;
+    #else
         return (FP_LONG)(v * 4294967296.0f);
+    #endif
     }
 
     /// <summary>
@@ -143,7 +247,56 @@ namespace Fixed64
     /// </summary>
     static double ToDouble(FP_LONG v)
     {
+    #if USE_IEEE754_2_FLOAT
+        FP_INT fractionalBits = Shift;
+        if (v == 0) {
+            return 0;
+        }
+        // Calculate the scaling factor as 2^fractionalBits
+        FP_LONG scalingFactor = 1LL << fractionalBits; // 2^fractionalBits
+
+        // Determine the sign bit, exponent, and mantissa
+        FP_ULONG sign = (v < 0) ? 1 : 0;
+        if (sign) {
+            v = -v; // Work with positive value for exponent and mantissa
+        }
+        FP_LONG mantissaBits = 1LL << 52;
+        FP_LONG exponent = 0;
+        if (v < mantissaBits) {
+            while (v < mantissaBits)
+            {
+                v <<= 1;
+                exponent--;
+            }
+            v = v - mantissaBits;
+        }
+        else {
+            FP_LONG valueGreaterThanScalingFactor = 0;
+            FP_LONG exp = exponent;
+            while (v >= mantissaBits)
+            {
+                exponent = exp;
+                valueGreaterThanScalingFactor = v;
+                v >>= 1;
+                exp++;
+            }
+            v = valueGreaterThanScalingFactor - mantissaBits;
+        }
+        exponent += 1023LL + 52LL - fractionalBits;
+
+        // Calculate the mantissa
+        FP_ULONG mantissa = v & 0xFFFFFFFFFFFFF; // 52 bits for mantissa
+
+        // Combine into IEEE 754 double format
+        FP_ULONG ieee754 = (sign << 63) | ((exponent & 0x7FF) << 52) | (mantissa & 0xFFFFFFFFFFFFF);
+
+        // Convert uint64_t to double using memcpy
+        double result;
+        memcpy(&result, &ieee754, sizeof(double));
+        return result;
+    #else
         return (double)v * (1.0 / 4294967296.0);
+    #endif
     }
 
     /// <summary>
@@ -151,7 +304,58 @@ namespace Fixed64
     /// </summary>
     static float ToFloat(FP_LONG v)
     {
+    #if USE_IEEE754_2_FLOAT
+        FP_INT fractionalBits = Shift;
+        if (v == 0) {
+            return 0.0f;
+        }
+
+        // Calculate the scaling factor as 2^fractionalBits
+        FP_LONG scalingFactor = 1LL << fractionalBits; // 2^fractionalBits
+
+        // Determine the sign bit, exponent, and mantissa
+        FP_UINT sign = (v < 0) ? 1 : 0;
+        if (sign) {
+            v = -v; // Work with positive value for exponent and mantissa
+        }
+
+        FP_LONG mantissaBits = 1LL << 23; // 23 bits for mantissa in float
+        FP_INT exponent = 0;
+
+        if (v < mantissaBits) {
+            while (v < mantissaBits) {
+                v <<= 1;
+                exponent--;
+            }
+            v = v - mantissaBits;
+        }
+        else {
+            FP_LONG valueGreaterThanScalingFactor = 0;
+            FP_INT exp = exponent;
+            while (v >= mantissaBits) {
+                exponent = exp;
+                valueGreaterThanScalingFactor = v;
+                v >>= 1;
+                exp++;
+            }
+            v = valueGreaterThanScalingFactor - mantissaBits;
+        }
+
+        exponent += 127LL + 23LL - fractionalBits; // Adjust exponent for float
+
+        // Calculate the mantissa
+        FP_UINT mantissa = v & 0x7FFFFF; // 23 bits for mantissa
+
+        // Combine into IEEE 754 float format
+        FP_UINT ieee754 = (sign << 31) | ((exponent & 0xFF) << 23) | (mantissa & 0x7FFFFF);
+
+        // Convert uint32_t to float using memcpy
+        float result;
+        memcpy(&result, &ieee754, sizeof(float));
+        return result;
+    #else
         return (float)v * (1.0f / 4294967296.0f);
+    #endif
     }
 
     /// <summary>
@@ -398,7 +602,7 @@ namespace Fixed64
         // Normalize input into [1.0, 2.0( range (convert to s2.30).
         FP_INT offset = 31 - Nlz((FP_ULONG)b);
         FP_INT n = (FP_INT)FixedUtil::ShiftRight(b, offset + 2);
-        static const FP_INT ONE = (1 << 30);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
         FP_ASSERT(n >= ONE);
 
         // Polynomial approximation.
@@ -427,7 +631,7 @@ namespace Fixed64
         // Normalize input into [1.0, 2.0( range (convert to s2.30).
         FP_INT offset = 31 - Nlz((FP_ULONG)b);
         FP_INT n = (FP_INT)FixedUtil::ShiftRight(b, offset + 2);
-        static const FP_INT ONE = (1 << 30);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
         FP_ASSERT(n >= ONE);
 
         // Polynomial approximation.
@@ -456,7 +660,7 @@ namespace Fixed64
         // Normalize input into [1.0, 2.0( range (convert to s2.30).
         FP_INT offset = 31 - Nlz((FP_ULONG)b);
         FP_INT n = (FP_INT)FixedUtil::ShiftRight(b, offset + 2);
-        static const FP_INT ONE = (1 << 30);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
         FP_ASSERT(n >= ONE);
 
         // Polynomial approximation.
@@ -523,7 +727,7 @@ namespace Fixed64
         }
 
         // Constants (s2.30).
-        static const FP_INT ONE = (1 << 30);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
         static const FP_INT SQRT2 = 1518500249; // sqrt(2.0)
 
         // Normalize input into [1.0, 2.0( range (as s2.30).
@@ -552,7 +756,7 @@ namespace Fixed64
         }
 
         // Constants (s2.30).
-        static const FP_INT ONE = (1 << 30);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
         static const FP_INT SQRT2 = 1518500249; // sqrt(2.0)
 
         // Normalize input into [1.0, 2.0( range (as s2.30).
@@ -581,7 +785,7 @@ namespace Fixed64
         }
 
         // Constants (s2.30).
-        static const FP_INT ONE = (1 << 30);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
         static const FP_INT SQRT2 = 1518500249; // sqrt(2.0)
 
         // Normalize input into [1.0, 2.0( range (as s2.30).
@@ -612,7 +816,7 @@ namespace Fixed64
         }
 
         // Constants (s2.30).
-        static const FP_INT ONE = (1 << 30);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
         static const FP_INT HALF_SQRT2 = 759250125; // 0.5 * sqrt(2.0)
 
         // Normalize input into [1.0, 2.0( range (as s2.30).
@@ -643,7 +847,7 @@ namespace Fixed64
         }
 
         // Constants (s2.30).
-        static const FP_INT ONE = (1 << 30);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
         static const FP_INT HALF_SQRT2 = 759250125; // 0.5 * sqrt(2.0)
 
         // Normalize input into [1.0, 2.0( range (as s2.30).
@@ -674,7 +878,7 @@ namespace Fixed64
         }
 
         // Constants (s2.30).
-        static const FP_INT ONE = (1 << 30);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
         static const FP_INT HALF_SQRT2 = 759250125; // 0.5 * sqrt(2.0)
 
         // Normalize input into [1.0, 2.0( range (as s2.30).
@@ -710,7 +914,7 @@ namespace Fixed64
         // Normalize input into [1.0, 2.0( range (convert to s2.30).
         FP_INT offset = 31 - Nlz((FP_ULONG)x);
         FP_INT n = (FP_INT)FixedUtil::ShiftRight(x, offset + 2);
-        static const FP_INT ONE = (1 << 30);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
         FP_ASSERT(n >= ONE);
 
         // Polynomial approximation.
@@ -739,7 +943,7 @@ namespace Fixed64
         // Normalize input into [1.0, 2.0( range (convert to s2.30).
         FP_INT offset = 31 - Nlz((FP_ULONG)x);
         FP_INT n = (FP_INT)FixedUtil::ShiftRight(x, offset + 2);
-        static const FP_INT ONE = (1 << 30);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
         FP_ASSERT(n >= ONE);
 
         // Polynomial approximation.
@@ -766,7 +970,7 @@ namespace Fixed64
         x *= sign;
 
         // Normalize input into [1.0, 2.0( range (convert to s2.30).
-        static const FP_INT ONE = (1 << 30);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
         FP_INT offset = 31 - Nlz((FP_ULONG)x);
         FP_INT n = (FP_INT)FixedUtil::ShiftRight(x, offset + 2);
         //FP_INT n = (FP_INT)(((offset >= 0) ? (x >> offset) : (x << -offset)) >> 2);
@@ -862,7 +1066,7 @@ namespace Fixed64
         }
 
         // Normalize value to range [1.0, 2.0( as s2.30 and extract exponent.
-        static const FP_INT ONE = (1 << 30);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
         FP_INT offset = 31 - Nlz((FP_ULONG)x);
         FP_INT n = (FP_INT)(((offset >= 0) ? (x >> offset) : (x << -offset)) >> 2);
         FP_ASSERT(n >= ONE);
@@ -882,7 +1086,7 @@ namespace Fixed64
         }
 
         // Normalize value to range [1.0, 2.0( as s2.30 and extract exponent.
-        static const FP_INT ONE = (1 << 30);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
         FP_INT offset = 31 - Nlz((FP_ULONG)x);
         FP_INT n = (FP_INT)(((offset >= 0) ? (x >> offset) : (x << -offset)) >> 2);
         FP_ASSERT(n >= ONE);
@@ -902,7 +1106,7 @@ namespace Fixed64
         }
 
         // Normalize value to range [1.0, 2.0( as s2.30 and extract exponent.
-        static const FP_INT ONE = (1 << 30);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
         FP_INT offset = 31 - Nlz((FP_ULONG)x);
         FP_INT n = (FP_INT)(((offset >= 0) ? (x >> offset) : (x << -offset)) >> 2);
         FP_ASSERT(n >= ONE);
@@ -926,7 +1130,7 @@ namespace Fixed64
         FP_INT n = (FP_INT)(((offset >= 0) ? (x >> offset) : (x << -offset)) >> 2);
 
         // Polynomial approximation of mantissa.
-        static const FP_INT ONE = (1 << 30);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
         FP_ASSERT(n >= ONE);
         FP_LONG y = (FP_LONG)FixedUtil::Log2Poly4Lut16(n - ONE) << 2;
 
@@ -948,7 +1152,7 @@ namespace Fixed64
         FP_INT n = (FP_INT)(((offset >= 0) ? (x >> offset) : (x << -offset)) >> 2);
 
         // Polynomial approximation of mantissa.
-        static const FP_INT ONE = (1 << 30);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
         FP_ASSERT(n >= ONE);
         FP_LONG y = (FP_LONG)FixedUtil::Log2Poly3Lut16(n - ONE) << 2;
 
@@ -970,7 +1174,7 @@ namespace Fixed64
         FP_INT n = (FP_INT)(((offset >= 0) ? (x >> offset) : (x << -offset)) >> 2);
 
         // Polynomial approximation of mantissa.
-        static const FP_INT ONE = (1 << 30);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
         FP_ASSERT(n >= ONE);
         FP_LONG y = (FP_LONG)FixedUtil::Log2Poly5(n - ONE) << 2;
 
@@ -1033,10 +1237,10 @@ namespace Fixed64
         // Handle quadrants 1 and 2 by mirroring the [1, 3] range to [-1, 1] (by calculating 2 - z).
         // The if condition uses the fact that for the quadrants of interest are 0b01 and 0b10 (top two bits are different).
         if ((z ^ (z << 1)) < 0)
-            z = (1 << 31) - z;
+            z = (((FP_INT)1) << 31) - z;
 
         // Now z is in range [-1, 1].
-        static const FP_INT ONE = (1 << 30);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
         FP_ASSERT((z >= -ONE) && (z <= ONE));
 
         // Polynomial approximation.
@@ -1054,10 +1258,10 @@ namespace Fixed64
         // Handle quadrants 1 and 2 by mirroring the [1, 3] range to [-1, 1] (by calculating 2 - z).
         // The if condition uses the fact that for the quadrants of interest are 0b01 and 0b10 (top two bits are different).
         if ((z ^ (z << 1)) < 0)
-            z = (1 << 31) - z;
+            z = (((FP_INT)1) << 31) - z;
 
         // Now z is in range [-1, 1].
-        static const FP_INT ONE = (1 << 30);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
         FP_ASSERT((z >= -ONE) && (z <= ONE));
 
         // Polynomial approximation.
@@ -1075,10 +1279,10 @@ namespace Fixed64
         // Handle quadrants 1 and 2 by mirroring the [1, 3] range to [-1, 1] (by calculating 2 - z).
         // The if condition uses the fact that for the quadrants of interest are 0b01 and 0b10 (top two bits are different).
         if ((z ^ (z << 1)) < 0)
-            z = (1 << 31) - z;
+            z = (((FP_INT)1) << 31) - z;
 
         // Now z is in range [-1, 1].
-        static const FP_INT ONE = (1 << 30);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
         FP_ASSERT((z >= -ONE) && (z <= ONE));
 
         // Polynomial approximation.
@@ -1138,7 +1342,7 @@ namespace Fixed64
     {
         FP_INT z = MulIntLongLow(RCP_HALF_PI, x);
         FP_LONG sinX = (FP_LONG)UnitSin(z) << 32;
-        FP_LONG cosX = (FP_LONG)UnitSin(z + (1 << 30)) << 32;
+        FP_LONG cosX = (FP_LONG)UnitSin(z + (((FP_INT)1) << 30)) << 32;
         return Div(sinX, cosX);
     }
 
@@ -1146,7 +1350,7 @@ namespace Fixed64
     {
         FP_INT z = MulIntLongLow(RCP_HALF_PI, x);
         FP_LONG sinX = (FP_LONG)UnitSinFast(z) << 32;
-        FP_LONG cosX = (FP_LONG)UnitSinFast(z + (1 << 30)) << 32;
+        FP_LONG cosX = (FP_LONG)UnitSinFast(z + (((FP_INT)1) << 30)) << 32;
         return DivFast(sinX, cosX);
     }
 
@@ -1154,7 +1358,7 @@ namespace Fixed64
     {
         FP_INT z = MulIntLongLow(RCP_HALF_PI, x);
         FP_LONG sinX = (FP_LONG)UnitSinFastest(z) << 32;
-        FP_LONG cosX = (FP_LONG)UnitSinFastest(z + (1 << 30)) << 32;
+        FP_LONG cosX = (FP_LONG)UnitSinFastest(z + (((FP_INT)1) << 30)) << 32;
         return DivFastest(sinX, cosX);
     }
 
@@ -1163,8 +1367,8 @@ namespace Fixed64
         FP_ASSERT(y >= 0 && x > 0 && x >= y);
 
         // Normalize input into [1.0, 2.0( range (convert to s2.30).
-        static const FP_INT ONE = (1 << 30);
-        static const FP_INT HALF = (1 << 29);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
+        static const FP_INT HALF = (((FP_INT)1) << 29);
         FP_INT offset = 31 - Nlz((FP_ULONG)x);
         FP_INT n = (FP_INT)(((offset >= 0) ? (x >> offset) : (x << -offset)) >> 2);
         FP_INT k = n - ONE;
@@ -1219,8 +1423,8 @@ namespace Fixed64
         FP_ASSERT(y >= 0 && x > 0 && x >= y);
 
         // Normalize input into [1.0, 2.0( range (convert to s2.30).
-        static const FP_INT ONE = (1 << 30);
-        static const FP_INT HALF = (1 << 29);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
+        static const FP_INT HALF = (((FP_INT)1) << 29);
         FP_INT offset = 31 - Nlz((FP_ULONG)x);
         FP_INT n = (FP_INT)(((offset >= 0) ? (x >> offset) : (x << -offset)) >> 2);
         FP_INT k = n - ONE;
@@ -1275,8 +1479,8 @@ namespace Fixed64
         FP_ASSERT(y >= 0 && x > 0 && x >= y);
 
         // Normalize input into [1.0, 2.0( range (convert to s2.30).
-        static const FP_INT ONE = (1 << 30);
-        static const FP_INT HALF = (1 << 29);
+        static const FP_INT ONE = (((FP_INT)1) << 30);
+        static const FP_INT HALF = (((FP_INT)1) << 29);
         FP_INT offset = 31 - Nlz((FP_ULONG)x);
         FP_INT n = (FP_INT)(((offset >= 0) ? (x >> offset) : (x << -offset)) >> 2);
         FP_INT k = n - ONE;

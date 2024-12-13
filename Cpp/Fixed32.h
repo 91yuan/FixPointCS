@@ -33,6 +33,7 @@
 
 // Include numeric types
 #include <stdint.h>
+#include <memory.h>
 #include "FixedUtil.h"
 #include "Fixed64.h"
 
@@ -54,6 +55,7 @@
 
 namespace Fixed32
 {
+#define USE_IEEE754_2_FLOAT 1
     typedef int32_t FP_INT;
     typedef uint32_t FP_UINT;
     typedef int64_t FP_LONG;
@@ -104,7 +106,51 @@ namespace Fixed32
     /// </summary>
     static FP_INT FromDouble(double v)
     {
+    #if USE_IEEE754_2_FLOAT
+        FP_INT fractionalBits = Shift;
+        // IEEE 754 format storage space
+        FP_ULONG ieee754;
+
+        // Copy the memory of double to uint64_t
+        memcpy(&ieee754, &v, sizeof(v));
+
+        // Extract the sign bit
+        FP_LONG sign = (ieee754 >> 63) & 0x1; // the sign bit
+        // Extract the exponent and adjust
+        FP_LONG exponent = (ieee754 >> 52) & 0x7FF; // 11-bit exponent
+        // Extract the mantissa (Mantissa)
+        FP_LONG mantissa = ieee754 & 0xFFFFFFFFFFFFF; // 52-bit mantissa
+
+        // Exponent adjustment
+        if (exponent == 0) {
+            // Denormalized number, handle as 0
+            return 0;
+        }
+        else if (exponent == 0x7FF) {
+            // If the exponent bits are all 1, return infinity or NaN
+            return (sign) ? INT64_MIN : INT64_MAX; // Return the maximum or minimum value based on the sign
+        }
+
+        // Calculate the effective exponent, subtract the offset (1023) and add 32 (because it needs to be multiplied by 2^32)
+        exponent -= 1023;
+        FP_LONG fixedPointValue = ((1LL << 52) + mantissa);
+        FP_INT rightShift = (52 - (fractionalBits + exponent));
+        if (rightShift >= 0) {
+            fixedPointValue = fixedPointValue >> rightShift;
+        }
+        else {
+            fixedPointValue = fixedPointValue << (-rightShift);
+        }
+
+        // If it's negative, adjust the sign
+        if (sign) {
+            fixedPointValue = -fixedPointValue;
+        }
+
+        return (FP_INT)fixedPointValue;
+    #else
         return (FP_INT)(v * 65536.0);
+    #endif
     }
 
     /// <summary>
@@ -112,7 +158,59 @@ namespace Fixed32
     /// </summary>
     static FP_INT FromFloat(float v)
     {
+    #if USE_IEEE754_2_FLOAT
+        FP_INT fractionalBits = Shift;
+        if (v > 2147483647.0f) {
+            return INT64_MAX;
+        }
+        if (v < -2147483648.0f) {
+            return INT64_MIN;
+        }
+
+        // IEEE 754 format storage space
+        FP_UINT ieee754;
+
+        // Copy the memory of float to uint32_t
+        memcpy(&ieee754, &v, sizeof(v));
+
+        // Extract the sign bit
+        FP_INT sign = (ieee754 >> 31) & 0x1; // Sign bit
+        // Extract the exponent and adjust
+        FP_INT exponent = (ieee754 >> 23) & 0xFF; // 8-bit exponent
+        // Extract the mantissa (Mantissa)
+        FP_INT mantissa = ieee754 & 0x7FFFFF; // 23-bit mantissa
+
+        // Exponent adjustment
+        if (exponent == 0) {
+            // Denormalized number, handle as 0
+            return 0;
+        }
+        else if (exponent == 0xFF) {
+            // If the exponent bits are all 1, return infinity or NaN
+            return (sign) ? INT64_MIN : INT64_MAX; // Return the maximum or minimum value based on the sign
+        }
+
+        // Calculate the effective exponent, subtract the offset (127) and add 32 (because it needs to be multiplied by 2^32)
+        exponent -= 127;
+        FP_LONG fixedPointValue = ((1LL << 23) + mantissa);
+
+        FP_INT leftShift = (exponent + fractionalBits - 23LL);
+        if (leftShift >= 0) {
+            fixedPointValue = fixedPointValue << leftShift;
+        }
+        else {
+            fixedPointValue = fixedPointValue >> (-leftShift);
+        }
+
+        // If it's negative, adjust the sign
+        if (sign) {
+            fixedPointValue = -fixedPointValue;
+        }
+
+        return (FP_INT)fixedPointValue;
+    #else
         return (FP_INT)(v * 65536.0f);
+    #endif
     }
 
     /// <summary>
@@ -142,17 +240,118 @@ namespace Fixed32
     /// <summary>
     /// Converts a fixed-point value into a double.
     /// </summary>
-    static double ToDouble(FP_INT v)
+    static double ToDouble(FP_INT iv)
     {
-        return (double)v * (1.0 / 65536.0);
+    #if USE_IEEE754_2_FLOAT
+        FP_INT fractionalBits = Shift;
+        if (iv == 0) {
+            return 0;
+        }
+        FP_LONG v = (FP_LONG)iv;
+        // Calculate the scaling factor as 2^fractionalBits
+        FP_LONG scalingFactor = 1LL << fractionalBits; // 2^fractionalBits
+
+        // Determine the sign bit, exponent, and mantissa
+        FP_ULONG sign = (v < 0) ? 1 : 0;
+        if (sign) {
+            v = -v; // Work with positive value for exponent and mantissa
+        }
+        FP_LONG mantissaBits = 1LL << 52;
+        FP_LONG exponent = 0;
+        if (v < mantissaBits) {
+            while (v < mantissaBits)
+            {
+                v <<= 1;
+                exponent--;
+            }
+            v = v - mantissaBits;
+        }
+        else {
+            FP_LONG valueGreaterThanScalingFactor = 0;
+            FP_LONG exp = exponent;
+            while (v >= mantissaBits)
+            {
+                exponent = exp;
+                valueGreaterThanScalingFactor = v;
+                v >>= 1;
+                exp++;
+            }
+            v = valueGreaterThanScalingFactor - mantissaBits;
+        }
+        exponent += 1023LL + 52LL - fractionalBits;
+
+        // Calculate the mantissa
+        FP_ULONG mantissa = v & 0xFFFFFFFFFFFFF; // 52 bits for mantissa
+
+        // Combine into IEEE 754 double format
+        FP_ULONG ieee754 = (sign << 63) | ((exponent & 0x7FF) << 52) | (mantissa & 0xFFFFFFFFFFFFF);
+
+        // Convert uint64_t to double using memcpy
+        double result;
+        memcpy(&result, &ieee754, sizeof(double));
+        return result;
+    #else
+        return (double)iv * (1.0 / 65536.0);
+    #endif
     }
 
     /// <summary>
     /// Converts a FP value into a float.
     /// </summary>
-    static float ToFloat(FP_INT v)
+    static float ToFloat(FP_INT iv)
     {
-        return (float)v * (1.0f / 65536.0f);
+    #if USE_IEEE754_2_FLOAT
+        FP_INT fractionalBits = Shift;
+        if (iv == 0) {
+            return 0.0f;
+        }
+        FP_LONG v = (FP_LONG)iv;
+        // Calculate the scaling factor as 2^fractionalBits
+        FP_LONG scalingFactor = 1LL << fractionalBits; // 2^fractionalBits
+
+        // Determine the sign bit, exponent, and mantissa
+        FP_UINT sign = (v < 0) ? 1 : 0;
+        if (sign) {
+            v = -v; // Work with positive value for exponent and mantissa
+        }
+
+        FP_LONG mantissaBits = 1LL << 23; // 23 bits for mantissa in float
+        FP_INT exponent = 0;
+
+        if (v < mantissaBits) {
+            while (v < mantissaBits) {
+                v <<= 1;
+                exponent--;
+            }
+            v = v - mantissaBits;
+        }
+        else {
+            FP_LONG valueGreaterThanScalingFactor = 0;
+            FP_INT exp = exponent;
+            while (v >= mantissaBits) {
+                exponent = exp;
+                valueGreaterThanScalingFactor = v;
+                v >>= 1;
+                exp++;
+            }
+            v = valueGreaterThanScalingFactor - mantissaBits;
+        }
+
+        exponent += 127LL + 23LL - fractionalBits; // Adjust exponent for float
+
+        // Calculate the mantissa
+        FP_UINT mantissa = v & 0x7FFFFF; // 23 bits for mantissa
+
+        // Combine into IEEE 754 float format
+        FP_UINT ieee754 = (sign << 31) | ((exponent & 0xFF) << 23) | (mantissa & 0x7FFFFF);
+
+        // Convert uint32_t to float using memcpy
+        float result;
+        memcpy(&result, &ieee754, sizeof(float));
+        return result;
+    #else
+        return (float)iv * (1.0f / 65536.0f);
+    #endif
     }
 
     /// <summary>
